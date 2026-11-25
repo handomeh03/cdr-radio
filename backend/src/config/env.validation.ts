@@ -207,6 +207,24 @@ export class EnvironmentVariables {
   @Max(65535)
   LIQUIDSOAP_CONTROL_PORT: number = 1234;
 
+  /**
+   * Optional server-only base URL of the playout control interface, for when Liquidsoap is not on
+   * this machine (e.g. the streaming service's public HTTPS origin on Render). Overrides
+   * LIQUIDSOAP_CONTROL_HOST/PORT when set. The bearer token travels in the request, so it must be
+   * https:// (plain http:// is accepted only for localhost). Never expose it to the browser.
+   */
+  @IsOptional()
+  @IsUrl({
+    require_tld: false,
+    require_protocol: true,
+    protocols: ['http', 'https'],
+  })
+  @Matches(/^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1|\[::1\])([:/]|$))/i, {
+    message:
+      'LIQUIDSOAP_CONTROL_URL must use https:// (http:// only for localhost)',
+  })
+  LIQUIDSOAP_CONTROL_URL?: string;
+
   /** Bearer token NestJS sends to Liquidsoap's control interface. */
   @IsString()
   @MinLength(32)

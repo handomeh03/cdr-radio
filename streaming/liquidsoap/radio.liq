@@ -27,6 +27,11 @@ api_url = environment.get(default="http://host.docker.internal:4000", "API_INTER
 stream_token = required_env("STREAM_INTERNAL_TOKEN")
 control_token = required_env("LIQUIDSOAP_CONTROL_TOKEN")
 control_port = string.to_int(default=1234, environment.get(default="1234", "LIQUIDSOAP_CONTROL_PORT"))
+# Local Docker publishes the control port on 127.0.0.1 only, so listening on all container interfaces
+# (the default) is fine there. The single-container Render image sets 127.0.0.1 instead.
+control_bind = environment.get(default="0.0.0.0", "HARBOR_BIND_ADDR")
+icecast_port = string.to_int(default=8000, environment.get(default="8000", "ICECAST_INTERNAL_PORT"))
+settings.harbor.bind_addrs := [control_bind]
 
 api_headers = [("Authorization", "Bearer #{stream_token}"), ("Content-Type", "application/json")]
 
@@ -246,6 +251,20 @@ def deny(response) =
   response.json({ok = false, error = "unauthorized"})
 end
 
+# Public-safe liveness: Liquidsoap is running AND Icecast lists this station's mount (so the output
+# is connected). No token, no secrets, and nothing that changes state. 503 when the mount is missing.
+harbor.http.register(port=control_port, method="GET", "/health", fun (_, response) -> begin
+  mount_listed =
+    try
+      status = http.get(timeout=2., "http://#{icecast_host}:#{icecast_port}/status-json.xsl")
+      status.status_code == 200 and string.contains(substring="/radio.mp3", "#{status}")
+    catch _ do
+      false
+    end
+  if not mount_listed then response.status_code(503) end
+  response.json({ok = mount_listed, source = on_air_source()})
+end)
+
 harbor.http.register(port=control_port, method="POST", "/control/skip", fun (req, response) -> begin
   if not authorized(req) then
     deny(response)
@@ -301,7 +320,7 @@ output.icecast(
   %mp3(bitrate=128, samplerate=44100, stereo=true),
   id="icecast_out",
   host=icecast_host,
-  port=8000,
+  port=icecast_port,
   password=source_password,
   mount="radio.mp3",
   name="CDR Central Radio",

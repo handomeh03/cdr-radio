@@ -1,0 +1,5 @@
+# Only the files the production image copies are needed. Test music must never enter the image.
+liquidsoap/music
+**/*.mp3
+**/*.env
+**/.env*

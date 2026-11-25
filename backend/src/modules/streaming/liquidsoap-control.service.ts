@@ -22,8 +22,10 @@ export interface ControlResult {
 const DEFAULT_TIMEOUT_MS = 40_000;
 
 /**
- * Client for Liquidsoap's private, token-protected HTTP control interface
- * (published on 127.0.0.1 only). Never reports success unless Liquidsoap confirmed it.
+ * Client for Liquidsoap's private, token-protected HTTP control interface (locally published on
+ * 127.0.0.1 only; in production reached through the streaming service's HTTPS gateway, which
+ * routes only /control/skip and /control/reload). Never reports success unless Liquidsoap
+ * confirmed it, and never logs the URL or the token.
  */
 @Injectable()
 export class LiquidsoapControlService {
@@ -34,9 +36,17 @@ export class LiquidsoapControlService {
   private readonly token: string;
 
   constructor(config: ConfigService<EnvironmentVariables, true>) {
-    const host = config.get('LIQUIDSOAP_CONTROL_HOST', { infer: true });
-    const port = config.get('LIQUIDSOAP_CONTROL_PORT', { infer: true });
-    this.baseUrl = `http://${host}:${port}`;
+    // A full base URL (HTTPS in production, e.g. the streaming service's public origin) wins;
+    // otherwise the local host/port pair is used exactly as before.
+    const url = config.get('LIQUIDSOAP_CONTROL_URL', { infer: true });
+    if (url) {
+      const parsed = new URL(url);
+      this.baseUrl = parsed.origin + parsed.pathname.replace(/\/+$/, '');
+    } else {
+      const host = config.get('LIQUIDSOAP_CONTROL_HOST', { infer: true });
+      const port = config.get('LIQUIDSOAP_CONTROL_PORT', { infer: true });
+      this.baseUrl = `http://${host}:${port}`;
+    }
     this.token = config.get('LIQUIDSOAP_CONTROL_TOKEN', { infer: true });
   }
 
@@ -59,6 +69,9 @@ export class LiquidsoapControlService {
       response = await fetch(this.baseUrl + path, {
         method: 'POST',
         headers: { authorization: `Bearer ${this.token}` },
+        // The control endpoint never redirects; treat a redirect as a failure instead of following
+        // it somewhere the token was not meant for.
+        redirect: 'error',
         signal: AbortSignal.timeout(LiquidsoapControlService.timeoutMs),
       });
     } catch (error) {

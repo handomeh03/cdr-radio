@@ -137,6 +137,26 @@ describe('validateEnv: streaming settings and placeholders', () => {
     ).toThrow(/LIQUIDSOAP_CONTROL_TOKEN/);
   });
 
+  it('LIQUIDSOAP_CONTROL_URL is optional and must be https (http only for localhost)', () => {
+    expect(validateEnv(base).LIQUIDSOAP_CONTROL_URL).toBeUndefined();
+    for (const ok of [
+      'https://cdr-radio-streaming.onrender.com',
+      'https://cdr-radio-streaming.onrender.com/',
+      'http://localhost:1234',
+      'http://127.0.0.1:1234',
+    ]) {
+      expect(validateEnv({ ...base, LIQUIDSOAP_CONTROL_URL: ok }).LIQUIDSOAP_CONTROL_URL).toBe(ok);
+    }
+    for (const bad of [
+      'http://cdr-radio-streaming.onrender.com',
+      'http://localhost.evil.example',
+      'ftp://x.example',
+      'cdr-radio-streaming.onrender.com',
+    ]) {
+      expect(() => validateEnv({ ...base, LIQUIDSOAP_CONTROL_URL: bad })).toThrow(/LIQUIDSOAP_CONTROL_URL/);
+    }
+  });
+
   it('rejects the REPLACE_WITH_... placeholders from the CLAUDE.md examples', () => {
     expect(() =>
       validateEnv({

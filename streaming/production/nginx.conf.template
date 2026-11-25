@@ -1,0 +1,144 @@
+# Public HTTP gateway for the single-container Render deployment.
+#
+# Rendered by entrypoint.sh with envsubst (only ${PORT}, ${ICECAST_PORT}, ${HARBOR_PORT} and
+# ${RUNTIME_DIR} are replaced; nginx's own $variables are left alone). It holds NO secrets: the
+# control token is checked by Liquidsoap itself; this gateway only rejects requests that do not
+# even carry a bearer token.
+#
+# Exactly these routes are public, everything else is 404:
+#   GET  /radio.mp3           the live stream (Icecast mount, unbuffered)
+#   GET  /status-json.xsl     Icecast's public status document (the backend reads listeners from it)
+#   GET  /healthz             Liquidsoap alive AND its mount listed by Icecast (503 otherwise)
+#   POST /control/skip        } Liquidsoap control, bearer token required,
+#   POST /control/reload      } /control/reload accepts only ?skip=1
+# Icecast's admin and source interfaces and Liquidsoap's other routes are not reachable.
+
+worker_processes 1;
+pid ${RUNTIME_DIR}/nginx.pid;
+error_log /dev/stderr warn;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    server_tokens off;
+
+    # No query strings, headers or bodies in the log (nothing sensitive can end up there).
+    log_format minimal '$remote_addr "$request_method $uri" $status $body_bytes_sent $request_time';
+    access_log /dev/stdout minimal;
+
+    # nginx runs unprivileged: every temp path must be writable.
+    client_body_temp_path ${RUNTIME_DIR}/tmp/body;
+    proxy_temp_path       ${RUNTIME_DIR}/tmp/proxy;
+    fastcgi_temp_path     ${RUNTIME_DIR}/tmp/fastcgi;
+    uwsgi_temp_path       ${RUNTIME_DIR}/tmp/uwsgi;
+    scgi_temp_path        ${RUNTIME_DIR}/tmp/scgi;
+
+    # Nothing here takes a request body.
+    client_max_body_size 1k;
+    client_header_timeout 10s;
+    client_body_timeout 10s;
+    # A listener that stops reading for this long is dropped (its player reconnects).
+    send_timeout 60s;
+    keepalive_timeout 30s;
+    gzip off;
+
+    limit_req_zone $binary_remote_addr zone=control:1m rate=10r/s;
+
+    server {
+        listen 0.0.0.0:${PORT} default_server;
+        server_name _;
+
+        add_header X-Content-Type-Options "nosniff" always;
+
+        # ---- the live audio ---------------------------------------------------------------------
+        location = /radio.mp3 {
+            limit_except GET HEAD { deny all; }
+            proxy_pass http://127.0.0.1:${ICECAST_PORT}/radio.mp3;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+
+            # A live stream: never buffer or cache it, send every byte as it arrives.
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_cache off;
+            tcp_nodelay on;
+            # (Icecast already sends Cache-Control: no-cache, no-store; this tells any proxy in front not to buffer.)
+            add_header X-Accel-Buffering "no" always;
+
+            # Long-lived connection. The source stays connected, so a read gap of this length means
+            # the stream is really stuck: close it so the player reconnects.
+            proxy_connect_timeout 3s;
+            proxy_send_timeout 10s;
+            proxy_read_timeout 60s;
+            proxy_hide_header Server;
+        }
+
+        # ---- public status ---------------------------------------------------------------------------
+        location = /status-json.xsl {
+            limit_except GET HEAD { deny all; }
+            proxy_pass http://127.0.0.1:${ICECAST_PORT}/status-json.xsl;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_connect_timeout 3s;
+            proxy_read_timeout 5s;
+            proxy_hide_header Server;
+            add_header Cache-Control "no-store" always;
+        }
+
+        location = /healthz {
+            limit_except GET HEAD { deny all; }
+            proxy_pass http://127.0.0.1:${HARBOR_PORT}/health;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_connect_timeout 2s;
+            proxy_read_timeout 5s;
+            add_header Cache-Control "no-store" always;
+        }
+
+        # ---- authenticated control (called by the NestJS backend) -----------------------------------
+        location = /control/skip {
+            limit_except POST { deny all; }
+            limit_req zone=control burst=10 nodelay;
+            default_type application/json;
+            if ($http_authorization !~ "^Bearer [A-Za-z0-9._~+/=-]{16,512}$") {
+                return 401 '{"ok":false,"error":"unauthorized"}';
+            }
+            proxy_pass http://127.0.0.1:${HARBOR_PORT}/control/skip;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Authorization $http_authorization;
+            proxy_connect_timeout 3s;
+            proxy_read_timeout 45s;
+            add_header Cache-Control "no-store" always;
+        }
+
+        location = /control/reload {
+            limit_except POST { deny all; }
+            limit_req zone=control burst=10 nodelay;
+            default_type application/json;
+            if ($http_authorization !~ "^Bearer [A-Za-z0-9._~+/=-]{16,512}$") {
+                return 401 '{"ok":false,"error":"unauthorized"}';
+            }
+            if ($args !~ "^(skip=1)?$") {
+                return 400 '{"ok":false,"error":"bad query"}';
+            }
+            proxy_pass http://127.0.0.1:${HARBOR_PORT}/control/reload;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Authorization $http_authorization;
+            proxy_connect_timeout 3s;
+            # A reload may fetch and download the next track (Liquidsoap bounds that at about 35 s).
+            proxy_read_timeout 45s;
+            add_header Cache-Control "no-store" always;
+        }
+
+        # Everything else (including /admin/*, /, /status.xsl, other mounts) does not exist here.
+        location / {
+            return 404;
+        }
+    }
+}

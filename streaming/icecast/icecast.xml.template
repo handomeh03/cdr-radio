@@ -23,6 +23,8 @@
     </authentication>
 
     <listen-socket>
+        <!-- 0.0.0.0 locally (Docker publishes the port); 127.0.0.1 in the single-container Render image. -->
+        <bind-address>${ICECAST_BIND_ADDRESS}</bind-address>
         <port>8000</port>
     </listen-socket>
 

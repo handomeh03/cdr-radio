@@ -17,7 +17,11 @@ for var in ICECAST_HOSTNAME ICECAST_SOURCE_PASSWORD ICECAST_ADMIN_PASSWORD ICECA
   esac
 done
 
-envsubst '${ICECAST_HOSTNAME} ${ICECAST_SOURCE_PASSWORD} ${ICECAST_ADMIN_PASSWORD} ${ICECAST_RELAY_PASSWORD}' \
+# Listen on all container interfaces (the published port is what limits access locally).
+ICECAST_BIND_ADDRESS="${ICECAST_BIND_ADDRESS:-0.0.0.0}"
+export ICECAST_BIND_ADDRESS
+
+envsubst '${ICECAST_HOSTNAME} ${ICECAST_SOURCE_PASSWORD} ${ICECAST_ADMIN_PASSWORD} ${ICECAST_RELAY_PASSWORD} ${ICECAST_BIND_ADDRESS}' \
   < /etc/icecast/icecast.xml.template > /var/icecast/icecast.xml
 chmod 600 /var/icecast/icecast.xml
 

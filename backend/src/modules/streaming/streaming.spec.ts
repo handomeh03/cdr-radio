@@ -145,6 +145,43 @@ describe('LiquidsoapControlService (against a local stand-in server)', () => {
     await expect(client().skip()).rejects.toBeInstanceOf(BadGatewayException);
   });
 
+  it('LIQUIDSOAP_CONTROL_URL replaces host/port, keeps a path prefix, and still sends the token', async () => {
+    reply = () => ({ status: 200, body: JSON.stringify({ ok: true, source: 'fallback', skipped: false }) });
+    const viaUrl = new LiquidsoapControlService(
+      config({
+        // The host/port pair points nowhere: the URL must win.
+        LIQUIDSOAP_CONTROL_HOST: '203.0.113.1',
+        LIQUIDSOAP_CONTROL_PORT: 9,
+        LIQUIDSOAP_CONTROL_URL: `http://127.0.0.1:${port}/gateway/`,
+        LIQUIDSOAP_CONTROL_TOKEN: 'control-token-xyz',
+      }),
+    );
+    await viaUrl.skip();
+    await viaUrl.reload({ skip: true });
+    expect(seen.map((r) => r.path)).toEqual(['/gateway/control/skip', '/gateway/control/reload?skip=1']);
+    expect(seen.every((r) => r.method === 'POST' && r.auth === 'Bearer control-token-xyz')).toBe(true);
+  });
+
+  it('does not follow a redirect (the token must not be sent elsewhere): 503', async () => {
+    const target = createServer((_req, res) => res.writeHead(302, { location: 'http://127.0.0.1:9/elsewhere' }).end());
+    await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve));
+    const redirectPort = (target.address() as AddressInfo).port;
+    await expect(client(redirectPort).skip()).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await new Promise((resolve) => target.close(resolve));
+  });
+
+  it('an https URL that does not speak TLS fails safely as 503, without leaking the URL or token', async () => {
+    const service = new LiquidsoapControlService(
+      config({
+        LIQUIDSOAP_CONTROL_URL: `https://127.0.0.1:${port}`,
+        LIQUIDSOAP_CONTROL_TOKEN: 'control-token-xyz',
+      }),
+    );
+    const error = await service.skip().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ServiceUnavailableException);
+    expect(JSON.stringify((error as ServiceUnavailableException).getResponse())).not.toMatch(/127\.0\.0\.1|control-token|https/);
+  });
+
   it('503 when the control interface is unreachable', async () => {
     const closed = createServer();
     await new Promise<void>((resolve) =>

@@ -1,0 +1,41 @@
+# Secrets / local environment (never commit)
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Credential screenshots / key material
+cloudflareKeys.png
+*.pem
+*.key
+
+# Local test audio for the streaming PoC (synthetic/licensed files only, not committed)
+streaming/liquidsoap/music/
+
+# Dependencies and build output
+node_modules/
+dist/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+
+# Assessment
+CDR_Online_Radio_Practical_Assessment_Updated.pdf
+
+
+# Documentation
+docs/

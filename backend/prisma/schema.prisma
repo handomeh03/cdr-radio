@@ -1,0 +1,13 @@
+// Root Prisma schema. Models live in prisma/models/*.prisma (added with their features).
+// The connection URL is configured in prisma.config.ts, not here (Prisma 7).
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}

@@ -1,0 +1,45 @@
+/// What the admin WANTS the station to do. Whether audio is actually on air is a Step 7 concern.
+enum BroadcastStatus {
+  ON_AIR
+  OFF_AIR
+}
+
+/// The radio station. There is exactly one for now (slug "main"); this is a settings row.
+model Station {
+  id               String           @id @default(uuid()) @db.Uuid
+  slug             String           @unique @db.VarChar(50)
+  name             String           @db.VarChar(100)
+  /// Playlist the station should broadcast. RESTRICT: a playlist selected here cannot be deleted.
+  activePlaylistId String?          @map("active_playlist_id") @db.Uuid
+  activePlaylist   Playlist?        @relation(fields: [activePlaylistId], references: [id], onDelete: Restrict)
+  /// Requested state only; not proof that audio is playing.
+  desiredStatus    BroadcastStatus  @default(OFF_AIR) @map("desired_status")
+  playback         StationPlayback?
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+
+  @@index([activePlaylistId])
+  @@map("stations")
+}
+
+/// What was last CONFIRMED to be playing (written only from real track-start events, never from
+/// settings). Empty until the playout integration reports one.
+model StationPlayback {
+  id                     String         @id @default(uuid()) @db.Uuid
+  stationId              String         @unique @map("station_id") @db.Uuid
+  station                Station        @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  /// Cleared (SET NULL) if the track or the playlist item is removed.
+  currentTrackId         String?        @map("current_track_id") @db.Uuid
+  currentTrack           Track?         @relation(fields: [currentTrackId], references: [id], onDelete: SetNull)
+  currentPlaylistTrackId String?        @map("current_playlist_track_id") @db.Uuid
+  currentPlaylistTrack   PlaylistTrack? @relation(fields: [currentPlaylistTrackId], references: [id], onDelete: SetNull)
+  /// When the current track actually started, as reported by playout.
+  startedAt              DateTime?      @map("started_at")
+  /// Offset into the track at startedAt (non-zero only when resuming mid-track).
+  startOffsetMs          Int            @default(0) @map("start_offset_ms")
+  updatedAt              DateTime       @updatedAt @map("updated_at")
+
+  @@index([currentTrackId])
+  @@index([currentPlaylistTrackId])
+  @@map("station_playback")
+}

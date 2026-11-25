@@ -1,0 +1,44 @@
+# Local streaming stack: ONLY Icecast and Liquidsoap.
+# NestJS, Next.js, PostgreSQL and FFmpeg run outside Docker.
+name: cdr-radio
+
+services:
+  icecast:
+    build: ./streaming/icecast
+    restart: unless-stopped
+    environment:
+      ICECAST_HOSTNAME: ${ICECAST_HOSTNAME:?set ICECAST_HOSTNAME in .env}
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set ICECAST_SOURCE_PASSWORD in .env}
+      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:?set ICECAST_ADMIN_PASSWORD in .env}
+      ICECAST_RELAY_PASSWORD: ${ICECAST_RELAY_PASSWORD:?set ICECAST_RELAY_PASSWORD in .env}
+    ports:
+      - "${ICECAST_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/status-json.xsl"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  liquidsoap:
+    image: savonet/liquidsoap:v2.4.6
+    restart: unless-stopped
+    command: ["/radio/radio.liq"]
+    environment:
+      ICECAST_HOST: icecast # Compose service name, not a Windows hostname
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set ICECAST_SOURCE_PASSWORD in .env}
+      # NestJS on the Windows host (scheduler + event receiver).
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://host.docker.internal:4000}
+      STREAM_INTERNAL_TOKEN: ${STREAM_INTERNAL_TOKEN:?set STREAM_INTERNAL_TOKEN in .env}
+      LIQUIDSOAP_CONTROL_TOKEN: ${LIQUIDSOAP_CONTROL_TOKEN:?set LIQUIDSOAP_CONTROL_TOKEN in .env}
+      LIQUIDSOAP_CONTROL_PORT: ${LIQUIDSOAP_CONTROL_PORT:-1234}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./streaming/liquidsoap/radio.liq:/radio/radio.liq:ro
+    # Token-protected control interface, reachable from this machine only (loopback).
+    ports:
+      - "127.0.0.1:${LIQUIDSOAP_CONTROL_PORT:-1234}:${LIQUIDSOAP_CONTROL_PORT:-1234}"
+    depends_on:
+      icecast:
+        condition: service_healthy

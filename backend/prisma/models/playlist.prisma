@@ -1,0 +1,35 @@
+/// An ordered list of tracks. A station will later select one playlist to broadcast.
+model Playlist {
+  id          String          @id @default(uuid()) @db.Uuid
+  name        String          @db.VarChar(100)
+  description String?         @db.VarChar(500)
+  /// The admin who created it; kept (as null) if that account is ever deleted.
+  createdById String?         @map("created_by_id") @db.Uuid
+  createdBy   User?           @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  items       PlaylistTrack[]
+  stations    Station[]
+  createdAt   DateTime        @default(now()) @map("created_at")
+  /// Also bumped on every item change (it doubles as the per-playlist edit lock).
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+
+  @@index([createdAt])
+  @@map("playlists")
+}
+
+/// One slot in a playlist. The same track may appear in several slots.
+model PlaylistTrack {
+  id         String            @id @default(uuid()) @db.Uuid
+  playlistId String            @map("playlist_id") @db.Uuid
+  trackId    String            @map("track_id") @db.Uuid
+  /// Zero-based, contiguous (0..n-1) within the playlist.
+  position   Int
+  playlist   Playlist          @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  /// RESTRICT: a track used by any playlist cannot be deleted.
+  track      Track             @relation(fields: [trackId], references: [id], onDelete: Restrict)
+  playbacks  StationPlayback[]
+  createdAt  DateTime          @default(now()) @map("created_at")
+
+  @@unique([playlistId, position])
+  @@index([trackId])
+  @@map("playlist_tracks")
+}

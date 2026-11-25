@@ -1,0 +1,31 @@
+enum TrackStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+/// An uploaded track. The audio lives in private R2 storage; only metadata is stored here.
+model Track {
+  id            String            @id @default(uuid()) @db.Uuid
+  title         String            @db.VarChar(200)
+  artist        String?           @db.VarChar(200)
+  status        TrackStatus       @default(PROCESSING)
+  /// Length of the processed MP3; null until READY.
+  durationMs    Int?              @map("duration_ms")
+  /// Container detected by ffprobe for the original upload (e.g. "flac", "mp3").
+  sourceFormat  String?           @map("source_format") @db.VarChar(32)
+  /// Size of the processed MP3 in bytes; null until READY.
+  sizeBytes     Int?              @map("size_bytes")
+  /// Private R2 object key (tracks/{id}.mp3); set only once the object exists. Never exposed.
+  storageKey    String?           @unique @map("storage_key")
+  /// Safe, user-facing failure reason when status is FAILED.
+  errorMessage  String?           @map("error_message") @db.VarChar(200)
+  playlistItems PlaylistTrack[]
+  playbacks     StationPlayback[]
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("tracks")
+}

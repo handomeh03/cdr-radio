@@ -22,9 +22,10 @@ export function useTracks(params: ListTracksParams) {
 }
 
 /**
- * Upload with two separate phases the UI can tell apart: `progress` (0-100) is the browser
- * sending the file; once it reaches 100 and the mutation is still pending, the server is
- * converting and storing it.
+ * Upload with two phases the UI can tell apart: `progress` (0-100) is the browser sending the file;
+ * once it reaches 100 and the mutation is still pending, the server is validating it. The server
+ * answers 202 with the track in PROCESSING and converts it in the background; the track list polls
+ * until it is READY or FAILED.
  */
 export function useUploadTrack() {
   const queryClient = useQueryClient();

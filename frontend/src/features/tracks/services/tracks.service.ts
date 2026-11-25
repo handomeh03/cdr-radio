@@ -1,7 +1,7 @@
 import { api } from "@/config/axios";
 import type { ListTracksParams, Track, TrackPage, UpdateTrackInput, UploadTrackInput } from "../types";
 
-/** Processing takes roughly 1-3 s per minute of audio on top of the upload, so allow plenty of time. */
+/** The server answers (202) once the file is validated; allow plenty of time for a slow upload. */
 const UPLOAD_TIMEOUT_MS = 5 * 60_000;
 
 export const tracksService = {

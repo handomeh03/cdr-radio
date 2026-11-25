@@ -66,9 +66,15 @@ const IN_PLAYLIST_MESSAGE =
 
 type Stage = 'transcode' | 'upload' | 'save';
 
+/** Uploads accepted but not yet converted (one converts at a time). Beyond this, uploads get 503. */
+const MAX_PENDING_UPLOADS = 5;
+
 @Injectable()
 export class TracksService implements OnApplicationBootstrap {
   private readonly logger = new Logger(TracksService.name);
+  /** Conversions waiting or running; they run one after another. */
+  private pending = 0;
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -76,7 +82,7 @@ export class TracksService implements OnApplicationBootstrap {
     private readonly storage: R2StorageService,
   ) {}
 
-  /** Processing is synchronous in one process, so PROCESSING rows at startup were interrupted. */
+  /** Conversion runs in this process, so PROCESSING rows at startup were interrupted. */
   async onApplicationBootstrap(): Promise<void> {
     try {
       const { count } = await this.prisma.track.updateMany({
@@ -94,36 +100,100 @@ export class TracksService implements OnApplicationBootstrap {
   }
 
   /**
-   * Validate -> create PROCESSING row -> transcode -> upload to R2 -> READY.
-   * Any failure after the row exists marks it FAILED; temp files are always removed.
+   * Validate -> create the PROCESSING row -> answer -> (in the background) transcode, upload to R2,
+   * mark READY. Only the quick validation can fail the request; a conversion or storage failure
+   * marks the row FAILED with a safe message, which the track list shows. Conversion can take
+   * minutes on a small host, far longer than a proxy or browser will wait for one request.
+   * Conversions run one at a time (CPU and memory), and at most MAX_PENDING_UPLOADS wait.
    */
   async upload(
     file: UploadedAudioFile,
     dto: UploadTrackDto,
   ): Promise<TrackDto> {
-    const outputPath = this.audio.newOutputPath();
     try {
-      let probed: ProbedAudio;
-      try {
-        probed = await this.audio.probeUpload(file.path);
-      } catch (error) {
-        throw toHttpError(error, 'transcode');
-      }
-
-      const track = await this.prisma.track.create({
-        data: {
-          title:
-            dto.title ?? probed.title ?? titleFromFileName(file.originalname),
-          artist: dto.artist ?? probed.artist,
-          sourceFormat: probed.format,
-          status: TrackStatus.PROCESSING,
-        },
-        select: { id: true },
-      });
-      return await this.process(track.id, file.path, probed, outputPath);
-    } finally {
-      await this.audio.removeTempFiles(file.path, outputPath);
+      return await this.accept(file, dto);
+    } catch (error) {
+      // Rejected before the conversion took the file over: delete it now (not only when the
+      // request's own cleanup eventually runs).
+      await this.audio.removeTempFiles(file.path);
+      throw error;
     }
+  }
+
+  private async accept(
+    file: UploadedAudioFile,
+    dto: UploadTrackDto,
+  ): Promise<TrackDto> {
+    if (this.pending >= MAX_PENDING_UPLOADS) {
+      throw new ServiceUnavailableException(
+        'Too many tracks are being converted right now; try again in a minute',
+      );
+    }
+    let probed: ProbedAudio;
+    try {
+      probed = await this.audio.probeUpload(file.path);
+    } catch (error) {
+      throw toHttpError(error, 'transcode');
+    }
+
+    const track = await this.prisma.track.create({
+      data: {
+        title:
+          dto.title ?? probed.title ?? titleFromFileName(file.originalname),
+        artist: dto.artist ?? probed.artist,
+        sourceFormat: probed.format,
+        status: TrackStatus.PROCESSING,
+      },
+      select: trackSelect,
+    });
+
+    // Take the file over, so it survives the response while it is converted in the background.
+    let inputPath: string;
+    try {
+      inputPath = await this.audio.adoptUpload(file.path);
+    } catch {
+      await this.markFailed(track.id, 'Could not store the uploaded file');
+      throw new InternalServerErrorException(
+        'Could not store the uploaded file',
+      );
+    }
+    const outputPath = this.audio.newOutputPath();
+    this.pending += 1;
+    this.queue = this.queue.then(() =>
+      this.runConversion(track.id, inputPath, probed, outputPath),
+    );
+    return track;
+  }
+
+  /** Resolves when no conversion is queued or running (tests, and a clean shutdown if wanted). */
+  whenIdle(): Promise<void> {
+    return this.queue;
+  }
+
+  /** Never rejects: failures are recorded on the row by process(). Always removes the temp files. */
+  private async runConversion(
+    id: string,
+    inputPath: string,
+    probed: ProbedAudio,
+    outputPath: string,
+  ): Promise<void> {
+    try {
+      await this.process(id, inputPath, probed, outputPath);
+    } catch {
+      // process() already logged it and marked the row FAILED.
+    } finally {
+      this.pending -= 1;
+      await this.audio.removeTempFiles(inputPath, outputPath);
+    }
+  }
+
+  private async markFailed(id: string, message: string): Promise<void> {
+    await this.prisma.track
+      .update({
+        where: { id },
+        data: { status: TrackStatus.FAILED, errorMessage: message },
+      })
+      .catch(() => this.logger.error(`Could not mark track ${id} as FAILED`));
   }
 
   private async process(

@@ -33,8 +33,13 @@ import { UploadCleanupInterceptor } from './upload-cleanup.interceptor.js';
 export class TracksController {
   constructor(private readonly tracks: TracksService) {}
 
-  /** multipart/form-data: file (required), title, artist (optional). */
+  /**
+   * multipart/form-data: file (required), title, artist (optional). Answers 202 with the track in
+   * PROCESSING as soon as the file is validated; conversion continues in the background and the
+   * row becomes READY or FAILED (poll GET /tracks).
+   */
   @Post()
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(Role.ADMIN)
   @UseInterceptors(FileInterceptor('file'), UploadCleanupInterceptor)
   upload(

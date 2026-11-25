@@ -20,6 +20,7 @@ import {
   makeUsers,
   sessionFor,
 } from './support/e2e-app.js';
+import { TracksService } from '../src/modules/tracks/tracks.service.js';
 import {
   createFakePrisma,
   createFakeStorage,
@@ -49,6 +50,12 @@ describe('Tracks (e2e, in-memory DB/R2, real FFmpeg)', () => {
     return req.attach('file', file);
   };
 
+  /** Waits for the background conversion and returns the finished track (via the API). */
+  const settled = async (id: string) => {
+    await app.get(TracksService, { strict: false }).whenIdle();
+    return (await request(server()).get(`/tracks/${id}`).set('Cookie', admin).expect(200)).body;
+  };
+
   beforeAll(async () => {
     fixtureDir = await mkdtemp(join(tmpdir(), 'cdr-tracks-e2e-'));
     fixtures = await createAudioFixtures(fixtureDir);
@@ -67,6 +74,7 @@ describe('Tracks (e2e, in-memory DB/R2, real FFmpeg)', () => {
   });
 
   afterEach(async () => {
+    await app.get(TracksService, { strict: false }).whenIdle(); // background conversions finish first
     storage.state.failUploads = false;
     expect(await leftoverTempFiles()).toEqual([]);
   });
@@ -122,51 +130,58 @@ describe('Tracks (e2e, in-memory DB/R2, real FFmpeg)', () => {
       await upload(fixtures.videoMp4).expect(422);
     });
 
-    it('201: WAV -> READY MP3 in storage, correct duration, no storage key in the response', async () => {
+    it('202: answers at once with PROCESSING, then the WAV becomes a READY MP3 in storage; no storage key in any response', async () => {
       const res = await upload(fixtures.wav, {
         title: '  Morning   Tone ',
         artist: 'CDR Test',
-      }).expect(201);
+      }).expect(202);
 
       expect(res.body).toMatchObject({
         title: 'Morning Tone',
         artist: 'CDR Test',
-        status: 'READY',
+        status: 'PROCESSING',
         sourceFormat: 'wav',
         errorMessage: null,
+        durationMs: null,
       });
-      expect(res.body.durationMs).toBeGreaterThan(2_900);
-      expect(res.body.durationMs).toBeLessThan(3_200);
       expect(res.body).not.toHaveProperty('storageKey');
+
+      const done = await settled(res.body.id);
+      expect(done).toMatchObject({ status: 'READY', errorMessage: null });
+      expect(done.durationMs).toBeGreaterThan(2_900);
+      expect(done.durationMs).toBeLessThan(3_200);
+      expect(done).not.toHaveProperty('storageKey');
       expect(storage.objects.get(`tracks/${res.body.id}.mp3`)).toEqual({
-        sizeBytes: res.body.sizeBytes,
+        sizeBytes: done.sizeBytes,
         contentType: 'audio/mpeg',
       });
     });
 
-    it('201: tags supply title/artist when fields are omitted', async () => {
-      const res = await upload(fixtures.flacTagged).expect(201);
+    it('202: tags supply title/artist when fields are omitted', async () => {
+      const res = await upload(fixtures.flacTagged).expect(202);
       expect(res.body).toMatchObject({
         title: 'Fixture Title',
         artist: 'Fixture Artist',
         sourceFormat: 'flac',
       });
+      expect(await settled(res.body.id)).toMatchObject({ status: 'READY' });
     });
 
-    it('502 when R2 fails: row FAILED with a safe message, no object stored', async () => {
+    it('R2 failure: the upload is accepted, then the row becomes FAILED with a safe message and no object is stored', async () => {
       storage.state.failUploads = true;
       const before = storage.objects.size;
       const res = await upload(fixtures.m4a, {
         title: 'Storage outage',
-      }).expect(502);
+      }).expect(202);
 
-      expect(res.body).toMatchObject({
-        message: 'Could not store the processed audio',
-        trackId: expect.any(String),
+      const done = await settled(res.body.id);
+      expect(done).toMatchObject({
+        status: 'FAILED',
+        errorMessage: 'Could not store the processed audio',
       });
-      const row = prisma.track.rows.find((r) => r.id === res.body.trackId);
+      expect(done.errorMessage).not.toMatch(/simulated|outage/);
+      const row = prisma.track.rows.find((r) => r.id === res.body.id);
       expect(row).toMatchObject({ status: 'FAILED', storageKey: null });
-      expect(row?.errorMessage).not.toMatch(/simulated|outage/);
       expect(storage.objects.size).toBe(before);
     });
   });

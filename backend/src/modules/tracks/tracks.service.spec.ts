@@ -63,6 +63,7 @@ function setup() {
       .fn()
       .mockResolvedValue({ durationMs: 3010, sizeBytes: 48_000 }),
     removeTempFiles: vi.fn().mockResolvedValue(undefined),
+    adoptUpload: vi.fn().mockResolvedValue('/tmp/work/upload-owned'),
   };
   const storage = {
     uploadFile: vi.fn().mockResolvedValue(undefined),
@@ -80,14 +81,12 @@ function setup() {
   return { prisma, audio, storage, service, failedUpdate };
 }
 
+const OWNED = '/tmp/work/upload-owned';
 const expectTempCleanup = (audio: ReturnType<typeof setup>['audio']) =>
-  expect(audio.removeTempFiles).toHaveBeenCalledWith(
-    FILE.path,
-    '/tmp/work/out-y.mp3',
-  );
+  expect(audio.removeTempFiles).toHaveBeenCalledWith(OWNED, '/tmp/work/out-y.mp3');
 
 describe('TracksService.upload', () => {
-  it('creates PROCESSING, uploads to tracks/{id}.mp3 and marks READY', async () => {
+  it('answers at once with the PROCESSING row, then converts, uploads to tracks/{id}.mp3 and marks READY', async () => {
     const { prisma, audio, storage, service } = setup();
     const result = await service.upload(FILE, { title: 'Given Title' });
 
@@ -100,19 +99,76 @@ describe('TracksService.upload', () => {
         }),
       }),
     );
+    expect(result).toMatchObject({ id: ID });
+
+    await service.whenIdle();
+    expect(audio.adoptUpload).toHaveBeenCalledWith(FILE.path);
     expect(storage.uploadFile).toHaveBeenCalledWith(
       `tracks/${ID}.mp3`,
       '/tmp/work/out-y.mp3',
       'audio/mpeg',
       48_000,
     );
-    expect(result).toMatchObject({
-      status: TrackStatus.READY,
-      durationMs: 3010,
-      sizeBytes: 48_000,
-      storageKey: `tracks/${ID}.mp3`,
-    });
+    expect(prisma.track.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: ID },
+        data: expect.objectContaining({
+          status: TrackStatus.READY,
+          durationMs: 3010,
+          sizeBytes: 48_000,
+          storageKey: `tracks/${ID}.mp3`,
+        }),
+      }),
+    );
     expectTempCleanup(audio);
+  });
+
+  it('does not wait for the conversion before answering', async () => {
+    const { audio, storage, service } = setup();
+    let finish: (v: { durationMs: number; sizeBytes: number }) => void = () => {};
+    audio.transcodeToMp3.mockReturnValue(
+      new Promise((resolve) => (finish = resolve)),
+    );
+    const result = await service.upload(FILE, {});
+    expect(result).toMatchObject({ id: ID });
+    expect(storage.uploadFile).not.toHaveBeenCalled(); // still converting
+    finish({ durationMs: 1, sizeBytes: 2 });
+    await service.whenIdle();
+    expect(storage.uploadFile).toHaveBeenCalled();
+  });
+
+  it('converts one track at a time, in order', async () => {
+    const { audio, service } = setup();
+    const events: string[] = [];
+    let release: () => void = () => {};
+    audio.transcodeToMp3
+      .mockImplementationOnce(async () => {
+        events.push('first start');
+        await new Promise<void>((resolve) => (release = resolve));
+        events.push('first end');
+        return { durationMs: 1, sizeBytes: 2 };
+      })
+      .mockImplementationOnce(async () => {
+        events.push('second start');
+        return { durationMs: 1, sizeBytes: 2 };
+      });
+    await service.upload(FILE, {});
+    await service.upload(FILE, {});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual(['first start']); // the second waits
+    release();
+    await service.whenIdle();
+    expect(events).toEqual(['first start', 'first end', 'second start']);
+  });
+
+  it('refuses new uploads (503, no row) when too many are waiting', async () => {
+    const { prisma, audio, service } = setup();
+    audio.transcodeToMp3.mockReturnValue(new Promise(() => {})); // never finishes
+    for (let i = 0; i < 5; i++) await service.upload(FILE, {});
+    await expect(service.upload(FILE, {})).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    expect(prisma.track.create).toHaveBeenCalledTimes(5);
   });
 
   it('falls back to file tags, then the file name, for the title', async () => {
@@ -130,9 +186,10 @@ describe('TracksService.upload', () => {
 
     await service.upload(FILE, {});
     expect(prisma.track.create.mock.calls[1][0].data.title).toBe('My Song');
+    await service.whenIdle();
   });
 
-  it('rejects non-audio with 422 without creating a row', async () => {
+  it('rejects non-audio with 422 without creating a row, and deletes the temp file', async () => {
     const { prisma, audio, storage, service } = setup();
     audio.probeUpload.mockRejectedValue(
       new AudioProcessingError('INVALID_AUDIO'),
@@ -143,23 +200,18 @@ describe('TracksService.upload', () => {
     );
     expect(prisma.track.create).not.toHaveBeenCalled();
     expect(storage.uploadFile).not.toHaveBeenCalled();
-    expectTempCleanup(audio);
+    expect(audio.adoptUpload).not.toHaveBeenCalled();
+    expect(audio.removeTempFiles).toHaveBeenCalledWith(FILE.path);
   });
 
-  it('FFmpeg failure: 422 with trackId, row FAILED, nothing uploaded', async () => {
+  it('FFmpeg failure: the request already succeeded; the row is FAILED with a safe message, nothing uploaded', async () => {
     const { audio, storage, service, failedUpdate } = setup();
     audio.transcodeToMp3.mockRejectedValue(
       new AudioProcessingError('TRANSCODE_FAILED'),
     );
 
-    const error = await service.upload(FILE, {}).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(UnprocessableEntityException);
-    expect((error as UnprocessableEntityException).getResponse()).toMatchObject(
-      {
-        message: 'Audio conversion failed',
-        trackId: ID,
-      },
-    );
+    await expect(service.upload(FILE, {})).resolves.toMatchObject({ id: ID });
+    await service.whenIdle();
     expect(failedUpdate()).toMatchObject({
       where: { id: ID },
       data: {
@@ -172,26 +224,24 @@ describe('TracksService.upload', () => {
     expectTempCleanup(audio);
   });
 
-  it('FFmpeg missing: 503 and FAILED', async () => {
+  it('FFmpeg missing: row FAILED', async () => {
     const { audio, service, failedUpdate } = setup();
     audio.transcodeToMp3.mockRejectedValue(
       new AudioProcessingError('UNAVAILABLE'),
     );
-    await expect(service.upload(FILE, {})).rejects.toBeInstanceOf(
-      ServiceUnavailableException,
-    );
+    await service.upload(FILE, {});
+    await service.whenIdle();
     expect(failedUpdate()).toBeDefined();
   });
 
-  it('R2 failure: 502, row FAILED, possibly-written object removed', async () => {
+  it('R2 failure: row FAILED, possibly-written object removed, no storage detail in the message', async () => {
     const { audio, storage, service, failedUpdate } = setup();
     storage.uploadFile.mockRejectedValue(
       new StorageError('upload', 'AccessDenied, HTTP 403'),
     );
 
-    await expect(service.upload(FILE, {})).rejects.toBeInstanceOf(
-      BadGatewayException,
-    );
+    await service.upload(FILE, {});
+    await service.whenIdle();
     expect(storage.deleteObject).toHaveBeenCalledWith(`tracks/${ID}.mp3`);
     expect(failedUpdate()?.data.errorMessage).toBe(
       'Could not store the processed audio',
@@ -200,16 +250,28 @@ describe('TracksService.upload', () => {
     expectTempCleanup(audio);
   });
 
-  it('DB failure after upload: 500 and the uploaded object is deleted (no orphan)', async () => {
+  it('DB failure after upload: the uploaded object is deleted (no orphan) and the queue keeps working', async () => {
     const { prisma, audio, storage, service } = setup();
     prisma.track.update.mockRejectedValueOnce(new Error('connection lost'));
 
-    await expect(service.upload(FILE, {})).rejects.toBeInstanceOf(
-      InternalServerErrorException,
-    );
+    await service.upload(FILE, {});
+    await service.whenIdle();
     expect(storage.uploadFile).toHaveBeenCalled();
     expect(storage.deleteObject).toHaveBeenCalledWith(`tracks/${ID}.mp3`);
     expectTempCleanup(audio);
+
+    await service.upload(FILE, {}); // a later upload still converts
+    await service.whenIdle();
+    expect(storage.uploadFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('cannot take over the temp file: the row is marked FAILED and the request gets 500', async () => {
+    const { audio, service, failedUpdate } = setup();
+    audio.adoptUpload.mockRejectedValue(new Error('disk full'));
+    await expect(service.upload(FILE, {})).rejects.toBeInstanceOf(
+      InternalServerErrorException,
+    );
+    expect(failedUpdate()).toBeDefined();
   });
 });
 

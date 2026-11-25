@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
@@ -142,6 +142,16 @@ export class AudioProcessingService implements OnModuleInit {
 
   newOutputPath(): string {
     return join(this.workDir, `out-${randomUUID()}.mp3`);
+  }
+
+  /**
+   * Moves an uploaded temp file to a name this service owns. The request's own cleanup then finds
+   * nothing to delete, so the file survives the response while it is converted in the background.
+   */
+  async adoptUpload(path: string): Promise<string> {
+    const owned = join(this.workDir, `upload-${randomUUID()}`);
+    await rename(path, owned);
+    return owned;
   }
 
   async removeTempFiles(...paths: Array<string | undefined>): Promise<void> {

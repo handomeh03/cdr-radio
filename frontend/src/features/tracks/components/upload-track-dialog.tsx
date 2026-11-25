@@ -51,7 +51,8 @@ export function UploadTrackDialog({ open, onOpenChange }: UploadTrackDialogProps
   });
 
   const busy = upload.isPending;
-  // 0-99 %: the browser is still sending the file. At 100 % the server is converting and storing it.
+  // 0-99 %: the browser is still sending the file. At 100 % the server is checking it; the conversion
+  // itself then continues in the background (the track shows as Processing in the list).
   const sending = busy && (upload.progress ?? 0) < 100;
   const processing = busy && !sending;
 
@@ -73,7 +74,7 @@ export function UploadTrackDialog({ open, onOpenChange }: UploadTrackDialogProps
         title: values.title || undefined,
         artist: values.artist || undefined,
       });
-      toast.success(`Uploaded “${track.title}”`);
+      toast.success(`“${track.title}” received. It is being converted and will show as Ready in the list.`);
       reset();
       onOpenChange(false);
     } catch (error) {
@@ -91,8 +92,8 @@ export function UploadTrackDialog({ open, onOpenChange }: UploadTrackDialogProps
         <DialogHeader>
           <DialogTitle>Upload a track</DialogTitle>
           <DialogDescription>
-            MP3, WAV, M4A/AAC, OGG or FLAC, up to {env.audioUploadMaxMb} MB. The server converts it to MP3
-            before it can be used in a playlist.
+            MP3, WAV, M4A/AAC, OGG or FLAC, up to {env.audioUploadMaxMb} MB. The server converts it to MP3 in
+            the background; it can be used in a playlist once it shows Ready.
           </DialogDescription>
         </DialogHeader>
 
@@ -152,10 +153,10 @@ export function UploadTrackDialog({ open, onOpenChange }: UploadTrackDialogProps
                 ) : (
                   <>
                     <p className="text-sm">
-                      Upload complete. Processing on the server: converting to MP3 and storing it. Longer
-                      files take longer.
+                      Upload complete. The server is checking the file; the conversion then continues in the
+                      background.
                     </p>
-                    <Progress value={100} className="animate-pulse" aria-label="Server processing" />
+                    <Progress value={100} className="animate-pulse" aria-label="Checking the file" />
                   </>
                 )}
               </div>
